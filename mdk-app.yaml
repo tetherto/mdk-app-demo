@@ -1,0 +1,9 @@
+id: io.tether.demo
+version: 0.11.0
+displayName: Demo Fleet Summary
+description: "Aggregates live telemetry and history from the demo-worker sample across registered devices."
+permissions:
+  - resources: [workers, devices]
+    verbs: [list, read]
+  - resources: [telemetry]
+    verbs: [read]
