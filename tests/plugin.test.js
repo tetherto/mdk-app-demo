@@ -3,7 +3,7 @@
 const test = require('brittle')
 const path = require('path')
 const { loadPlugin } = require('@tetherto/mdk-gateway/workers/lib/plugin-loader')
-const { isDemoDevice, listDemoDevices, telemetryNames } = require('../lib/devices')
+const { hasHistory, isDemoDevice, listDemoDevices, telemetryNames } = require('../lib/devices')
 
 const PLUGIN_DIR = path.resolve(__dirname, '..')
 
@@ -19,9 +19,29 @@ const DEMO_CAPS = {
   }
 }
 
+/** Not a miner: a power meter exposes no `hashrate_rt`. */
 const OTHER_CAPS = {
   capabilities: {
-    telemetry: [{ name: 'hashrate_rt' }, { name: 'power' }]
+    telemetry: [{ name: 'power' }, { name: 'energy' }]
+  }
+}
+
+/** What `mdk create worker` scaffolds: hashrate_rt in TH/s and no `history` channel. */
+const TEMPLATE_CAPS = {
+  capabilities: {
+    telemetry: [
+      { name: 'hashrate_rt', unit: 'TH/s' },
+      { name: 'power', unit: 'W' },
+      { name: 'temperature', unit: 'C' },
+      { name: 'power_mode' }
+    ]
+  }
+}
+
+/** A hashrate in another unit would skew the TH/s totals, so it is skipped. */
+const GHS_CAPS = {
+  capabilities: {
+    telemetry: [{ name: 'hashrate_rt', unit: 'GH/s' }, { name: 'power', unit: 'W' }]
   }
 }
 
@@ -34,7 +54,7 @@ const DEMO_CAPS_FLAT = {
   ]
 }
 
-function mockClient ({ workers, metrics, history, historyViaMetrics, failList, failListErr, failCaps, failPull } = {}) {
+function mockClient ({ workers, metrics, history, historyViaMetrics, failList, failListErr, failCaps, failPull, pulls } = {}) {
   return {
     async listWorkers () {
       if (failList) throw new Error(failListErr || 'ERR_MDK_CLIENT_UNAVAILABLE')
@@ -44,11 +64,14 @@ function mockClient ({ workers, metrics, history, historyViaMetrics, failList, f
       if (failCaps && failCaps.has(deviceId)) throw new Error('caps failed')
       if (deviceId.startsWith('flat-')) return DEMO_CAPS_FLAT
       if (deviceId.startsWith('other-')) return OTHER_CAPS
+      if (deviceId.startsWith('tpl-')) return TEMPLATE_CAPS
+      if (deviceId.startsWith('ghs-')) return GHS_CAPS
       return DEMO_CAPS
     },
     async pullTelemetry (deviceId, query) {
       if (failPull && failPull.has(deviceId)) throw new Error('pull failed')
       const type = typeof query === 'string' ? query : (query && query.type) || 'metrics'
+      if (pulls) pulls.push(`${deviceId}:${type}`)
       if (type === 'metrics') {
         return { metrics: (metrics && metrics[deviceId]) || null }
       }
@@ -148,7 +171,7 @@ test('demo plugin - summary tolerates missing telemetry and pull failures', asyn
   t.is(out.deviceCount, 2)
   t.is(out.totals.hashrateThs, 0)
   t.is(out.totals.powerW, 0)
-  t.is(out.totals.avgTemperatureC, 0)
+  t.is(out.totals.avgTemperatureC, null, 'no device reported a temperature')
   t.is(out.devices[0].powerMode, null)
   t.is(out.devices[1].hashrateThs, 0)
 })
@@ -169,6 +192,38 @@ test('demo plugin - summary skips dead workers and failed capability lookups', a
   const out = await summary(emptyReq())
   t.is(out.deviceCount, 1)
   t.alike(out.devices.map((d) => d.deviceId), ['demo-0'])
+})
+
+test('demo plugin - summary averages temperature over the devices that report one', async (t) => {
+  const { summary } = loadDemoPlugin(mockClient({
+    workers: [{ workerId: 'demo-a', state: 'READY', deviceIds: ['demo-0', 'demo-1', 'demo-2'] }],
+    metrics: {
+      'demo-0': { hashrate_rt: 100, temperature: 70 },
+      'demo-1': { hashrate_rt: 100, temperature: 70 }
+    },
+    failPull: new Set(['demo-2'])
+  }))
+
+  const out = await summary(emptyReq())
+  t.is(out.deviceCount, 3)
+  t.is(out.totals.avgTemperatureC, 70, 'the offline device is left out, not counted as 0')
+})
+
+test('demo plugin - summary includes a worker scaffolded by mdk create worker', async (t) => {
+  const { summary } = loadDemoPlugin(mockClient({
+    workers: [{ workerId: 'tpl-a', state: 'READY', deviceIds: ['tpl-0', 'ghs-0', 'other-0'] }],
+    metrics: {
+      'tpl-0': { hashrate_rt: 110, power: 3100, temperature: 62, power_mode: 'normal' },
+      'ghs-0': { hashrate_rt: 110000, power: 3100 },
+      'other-0': { power: 5000 }
+    }
+  }))
+
+  const out = await summary(emptyReq())
+  t.is(out.deviceCount, 1, 'GH/s hashrate and non-miner skipped')
+  t.is(out.devices[0].deviceId, 'tpl-0')
+  t.is(out.totals.hashrateThs, 110)
+  t.is(out.totals.powerW, 3100)
 })
 
 test('demo plugin - summary matches flat telemetry capability shape', async (t) => {
@@ -280,6 +335,23 @@ test('demo plugin - history accepts metrics.history fallback and empty pulls', a
   t.alike(out.devices[1].samples, [])
 })
 
+test('demo plugin - history lists a device without a history channel but never pulls it', async (t) => {
+  const pulls = []
+  const samples = [{ ts: 1, hashrate_ths: 100 }]
+  const { history } = loadDemoPlugin(mockClient({
+    workers: [{ workerId: 'mixed', state: 'READY', deviceIds: ['demo-0', 'tpl-0'] }],
+    history: { 'demo-0': samples },
+    pulls
+  }))
+
+  const out = await history(emptyReq())
+  t.is(out.deviceCount, 2)
+  t.alike(out.devices.map((d) => [d.deviceId, d.hasHistory]), [['demo-0', true], ['tpl-0', false]])
+  t.alike(out.devices[0].samples, samples)
+  t.alike(out.devices[1].samples, [])
+  t.alike(pulls, ['demo-0:history'], 'only the device with a history channel is pulled')
+})
+
 test('demo plugin - history empty fleet returns zero devices', async (t) => {
   const { history } = loadDemoPlugin(mockClient({ workers: [] }))
   const out = await history(emptyReq())
@@ -288,8 +360,8 @@ test('demo plugin - history empty fleet returns zero devices', async (t) => {
   t.alike(out.devices, [])
 })
 
-test('demo plugin - ambient client falls back to createMdkClient without injection', (t) => {
-  // Production path: no config.mdkClient — lib/client.js calls createMdkClient(config).
+test('demo plugin - loads without a client (routes answer once the runtime provides one)', (t) => {
+  // Production path: the app runtime puts its signed-in client at config.mdkClient.
   const { plugin } = loadDemoPlugin(null)
   t.is(plugin.routes.length, 2)
 })
@@ -310,8 +382,14 @@ test('devices helpers - telemetryNames and isDemoDevice edge cases', (t) => {
 
   t.is(isDemoDevice(null), false)
   t.is(isDemoDevice(OTHER_CAPS), false)
-  t.is(isDemoDevice(DEMO_CAPS), true)
+  t.is(isDemoDevice(GHS_CAPS), false, 'hashrate_rt in another unit')
+  t.is(isDemoDevice(DEMO_CAPS), true, 'no unit declared')
   t.is(isDemoDevice(DEMO_CAPS_FLAT), true)
+  t.is(isDemoDevice(TEMPLATE_CAPS), true)
+
+  t.is(hasHistory(DEMO_CAPS), true)
+  t.is(hasHistory(TEMPLATE_CAPS), false)
+  t.is(hasHistory(null), false)
 })
 
 test('devices helpers - listDemoDevices skips dead workers and null workers list', async (t) => {

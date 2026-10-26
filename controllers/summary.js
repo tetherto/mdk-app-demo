@@ -3,9 +3,9 @@
 const mdkClient = require('../lib/client')
 const { listDemoDevices } = require('../lib/devices')
 
-// Live fleet rollup for demo-worker devices: fans out metrics pulls and sums
-// hashrate_rt / power (units from the contract: TH/s, W). Temperature is
-// averaged across reporting devices; power_mode stays per-device.
+// Live fleet rollup across every matched device (see lib/devices.js): fans out
+// metrics pulls and sums hashrate_rt / power (units from the contract: TH/s, W).
+// Temperature is averaged across reporting devices; power_mode stays per-device.
 module.exports = async function summary (req) {
   let devices
   try {
@@ -24,9 +24,11 @@ module.exports = async function summary (req) {
     throw err
   }
 
+  const temperatures = []
   const rows = await Promise.all(devices.map(async ({ deviceId, workerId, state }) => {
     const tel = await mdkClient.pullTelemetry(deviceId, 'metrics').catch(() => null)
     const m = (tel && tel.metrics) || {}
+    if (Number.isFinite(m.temperature)) temperatures.push(m.temperature)
     return {
       deviceId,
       workerId,
@@ -40,11 +42,9 @@ module.exports = async function summary (req) {
 
   let totalHashrateThs = 0
   let totalPowerW = 0
-  let tempSum = 0
   for (const row of rows) {
     totalHashrateThs += row.hashrateThs
     totalPowerW += row.powerW
-    tempSum += row.temperatureC
   }
 
   return {
@@ -55,7 +55,7 @@ module.exports = async function summary (req) {
     totals: {
       hashrateThs: totalHashrateThs,
       powerW: totalPowerW,
-      avgTemperatureC: rows.length ? tempSum / rows.length : null
+      avgTemperatureC: temperatures.length ? temperatures.reduce((sum, c) => sum + c, 0) / temperatures.length : null
     },
     devices: rows
   }

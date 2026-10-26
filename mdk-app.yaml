@@ -1,9 +1,9 @@
 id: io.tether.demo
-version: 0.11.0
+version: 0.12.0
 displayName: Demo Fleet Summary
-description: "Aggregates live telemetry and history from the demo-worker sample across registered devices."
+description: "Aggregates live telemetry and history across registered miners that report hashrate_rt in TH/s."
 permissions:
-  - resources: [workers, devices]
-    verbs: [list, read]
-  - resources: [telemetry]
+  - resources: [workers]
+    verbs: [list]
+  - resources: [devices]
     verbs: [read]

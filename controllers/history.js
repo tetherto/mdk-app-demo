@@ -3,9 +3,10 @@
 const mdkClient = require('../lib/client')
 const { listDemoDevices } = require('../lib/devices')
 
-// Recent SQLite samples from demo-worker's `history` telemetry channel
-// (params: { limit }). Optional deviceId scopes to one device; otherwise every
-// matched demo device is included.
+// Recent samples from each device's `history` telemetry channel (params:
+// { limit }). Optional deviceId scopes to one device; otherwise every matched
+// device is listed. A device whose Worker declares no `history` channel is
+// listed with `hasHistory: false` and no samples, and is never pulled.
 module.exports = async function history (req) {
   const limit = Math.min(Math.max(Number(req.query && req.query.limit) || 10, 1), 500)
   const deviceIdFilter = req.query && req.query.deviceId
@@ -25,14 +26,15 @@ module.exports = async function history (req) {
     if (!devices.length) throw Object.assign(new Error('ERR_UNKNOWN_DEVICE_ID'), { statusCode: 404 })
   }
 
-  const rows = await Promise.all(devices.map(async ({ deviceId, workerId }) => {
+  const rows = await Promise.all(devices.map(async ({ deviceId, workerId, hasHistory }) => {
+    if (!hasHistory) return { deviceId, workerId, hasHistory, samples: [] }
     const tel = await mdkClient.pullTelemetry(deviceId, { type: 'history', limit }).catch(() => null)
     // Named-channel pull returns { name, value }; metrics-bundle history would
     // sit under metrics.history — accept either so the route stays resilient.
     const samples = Array.isArray(tel && tel.value)
       ? tel.value
       : (tel && tel.metrics && Array.isArray(tel.metrics.history) ? tel.metrics.history : [])
-    return { deviceId, workerId, samples }
+    return { deviceId, workerId, hasHistory, samples }
   }))
 
   return {

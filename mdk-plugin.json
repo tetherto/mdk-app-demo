@@ -1,7 +1,7 @@
 {
   "name": "@tetherto/mdk-app-demo",
   "version": "0.1.0",
-  "description": "Aggregates live telemetry and SQLite history from @tetherto/mdk-worker-demo devices via the MDK protocol client.",
+  "description": "Aggregates live telemetry and history from every registered device whose Worker exposes `hashrate_rt` in TH/s, via the MDK protocol client.",
   "routes": [
     {
       "id": "demo.summary",
@@ -12,7 +12,7 @@
         "path": "/api/demo/summary",
         "responses": {
           "200": {
-            "description": "Fleet totals and per-device metrics for demo-worker devices.",
+            "description": "Fleet totals and per-device metrics for the matched devices.",
             "content": {
               "application/json": {
                 "schema": {
@@ -38,10 +38,10 @@
           }
         }
       },
-      "description": "Fans out metrics telemetry to every registered demo-worker device (fingerprint: `hashrate_rt` + history) and returns fleet totals plus a per-device breakdown. Aggregation lives here — workers only ever answer for one device.",
+      "description": "Fans out metrics telemetry to every registered device whose Worker exposes `hashrate_rt` in TH/s (what `mdk create worker` scaffolds) and returns fleet totals plus a per-device breakdown. Aggregation lives here — workers only ever answer for one device.",
       "constraints": [
         "Requires the MDK client to be connected to a Kernel instance for live data.",
-        "Devices must expose demo-worker telemetry channels (hashrate_rt, power, temperature, power_mode, history)."
+        "Devices must expose `hashrate_rt` in TH/s, or with no unit; `power`, `temperature` and `power_mode` are read when present."
       ],
       "examples": [
         {
@@ -91,7 +91,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Recent telemetry samples from each demo-worker's SQLite history channel.",
+            "description": "Recent telemetry samples from each matched device's history channel.",
             "content": {
               "application/json": {
                 "schema": {
@@ -109,14 +109,14 @@
           }
         }
       },
-      "description": "Pulls the demo-worker `history` telemetry channel (SQLite recent samples: ts, `hashrate_ths`, `power_w`, `board_temp_c`) for every matched device, or a single device when `deviceId` is set.",
+      "description": "Pulls the `history` telemetry channel (recent samples) for every matched device that declares one, or a single device when `deviceId` is set. Devices without the channel are listed with `hasHistory: false` and no samples.",
       "constraints": [
         "limit defaults to 10 and is capped at 500.",
-        "Samples come from the worker's own store — the device is not contacted for this channel."
+        "What a sample holds is up to each Worker's `history` handler."
       ],
       "examples": [
         {
-          "description": "Last 5 samples for every demo device",
+          "description": "Last 5 samples for every matched device",
           "request": "GET /api/demo/history?limit=5",
           "response": {
             "ok": true,
@@ -127,6 +127,7 @@
               {
                 "deviceId": "demo-a-0",
                 "workerId": "demo-a",
+                "hasHistory": true,
                 "samples": [
                   { "ts": 1710000000000, "hashrate_ths": 100, "power_w": 3000, "board_temp_c": 64 }
                 ]
