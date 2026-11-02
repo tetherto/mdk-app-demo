@@ -201,6 +201,33 @@ test('demo plugin - summary falls back to a live pull only for devices the snaps
     'the polling worker is read once; only the legacy worker and the device without a point are pulled live')
 })
 
+test('demo plugin - summary falls back to live pulls on a 0.13.0 stack: the client throws on the unknown method, or the Kernel answers an error', async (t) => {
+  const pulls = []
+  const opts = {
+    workers: [{ workerId: 'demo-a', state: 'READY', deviceIds: ['demo-0'] }],
+    metrics: { 'demo-0': { hashrate_rt: 100, power: 3000 } },
+    pulls
+  }
+  // @tetherto/mdk-client 0.13.0: every method name resolves (Proxy) and an unknown one rejects.
+  const older = mockClient(opts)
+  older.pullSnapshot = async () => { throw new Error('ERR_MDK_CLIENT_NO_SUCH_METHOD: pullSnapshot') }
+  let out = await loadDemoPlugin(older).summary(emptyReq())
+  t.is(out.ok, true)
+  t.is(out.totals.hashrateThs, 100)
+  t.is(out.snapshotTs, null)
+  t.alike(out.devices.map((d) => d.source), ['live'])
+  t.alike(pulls, ['demo-0:metrics'])
+
+  // A 0.13.0 Kernel: the query is not understood and comes back as an { error } reply.
+  pulls.length = 0
+  const olderKernel = mockClient(opts)
+  olderKernel.pullSnapshot = async () => ({ error: 'ERR_DEVICE_ID_REQUIRED: snapshot' })
+  out = await loadDemoPlugin(olderKernel).summary(emptyReq())
+  t.is(out.totals.hashrateThs, 100)
+  t.alike(out.devices.map((d) => d.source), ['live'])
+  t.alike(pulls, ['demo-0:metrics'])
+})
+
 test('demo plugin - summary works against a client without pullSnapshot', async (t) => {
   const client = mockClient({
     workers: [{ workerId: 'demo-a', state: 'READY', deviceIds: ['demo-0'] }],

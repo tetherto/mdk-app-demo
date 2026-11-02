@@ -76,13 +76,17 @@ module.exports = async function summary (req) {
 
 // One read over the matched devices' Workers. A Worker that does not poll is
 // reported under `errors` and its devices are absent from `devices`, which
-// is all the caller needs to fall back to a live pull. An older client
-// without pullSnapshot leaves every device to the live path.
+// is all the caller needs to fall back to a live pull. A stack without the
+// read at all leaves every device to the live path: a 0.13.0 client answers
+// any unknown method with ERR_MDK_CLIENT_NO_SUCH_METHOD (its method surface
+// is a Proxy, so a typeof check cannot tell), and a 0.13.0 Kernel answers
+// the query with an `{ error }` reply.
 async function pullSnapshot (devices) {
   const workers = [...new Set(devices.map((d) => d.workerId))]
   if (!workers.length || typeof mdkClient.pullSnapshot !== 'function') return { devices: {} }
-  const snap = await mdkClient.pullSnapshot({ workers, metrics: CHANNELS })
-  return { devices: (snap && snap.devices) || {}, snapshotTs: snap && snap.snapshotTs }
+  const snap = await mdkClient.pullSnapshot({ workers, metrics: CHANNELS }).catch(() => null)
+  if (!snap || snap.error || !snap.devices) return { devices: {} }
+  return { devices: snap.devices, snapshotTs: snap.snapshotTs }
 }
 
 // A stored point holds `{ value }` per metric, or `{ error }` when the handler
