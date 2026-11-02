@@ -3,9 +3,17 @@
 const mdkClient = require('../lib/client')
 const { listDemoDevices } = require('../lib/devices')
 
-// Live fleet rollup across every matched device (see lib/devices.js): fans out
-// metrics pulls and sums hashrate_rt / power (units from the contract: TH/s, W).
-// Temperature is averaged across reporting devices; power_mode stays per-device.
+const CHANNELS = ['hashrate_rt', 'power', 'temperature', 'power_mode']
+
+// Live fleet rollup across every matched device (see lib/devices.js): sums
+// hashrate_rt / power (units from the contract: TH/s, W), averages
+// temperature across reporting devices; power_mode stays per-device.
+//
+// The fleet is read in one Kernel call, `pullSnapshot`, answered from the
+// stores of Workers that poll their devices (`telemetryPollIntervalMs`), so
+// the route never starts a polling loop of its own. A device the snapshot
+// does not hold — its Worker does not poll, or has no point yet — is read
+// live with `pullTelemetry`, so the app works against any Worker.
 module.exports = async function summary (req) {
   let devices
   try {
@@ -24,15 +32,19 @@ module.exports = async function summary (req) {
     throw err
   }
 
+  const snap = await pullSnapshot(devices)
+
   const temperatures = []
   const rows = await Promise.all(devices.map(async ({ deviceId, workerId, state }) => {
-    const tel = await mdkClient.pullTelemetry(deviceId, 'metrics').catch(() => null)
-    const m = (tel && tel.metrics) || {}
+    const stored = snap.devices[deviceId]
+    const m = stored ? storedMetrics(stored) : await liveMetrics(deviceId)
     if (Number.isFinite(m.temperature)) temperatures.push(m.temperature)
     return {
       deviceId,
       workerId,
       state,
+      source: stored ? 'snapshot' : 'live',
+      ts: stored ? stored.ts : null,
       hashrateThs: Number(m.hashrate_rt) || 0,
       powerW: Number(m.power) || 0,
       temperatureC: Number(m.temperature) || 0,
@@ -51,6 +63,7 @@ module.exports = async function summary (req) {
     ok: true,
     kernelConnected: true,
     ts: Date.now(),
+    snapshotTs: snap.snapshotTs || null,
     deviceCount: rows.length,
     totals: {
       hashrateThs: totalHashrateThs,
@@ -59,4 +72,30 @@ module.exports = async function summary (req) {
     },
     devices: rows
   }
+}
+
+// One read over the matched devices' Workers. A Worker that does not poll is
+// reported under `errors` and its devices are absent from `devices`, which
+// is all the caller needs to fall back to a live pull. An older client
+// without pullSnapshot leaves every device to the live path.
+async function pullSnapshot (devices) {
+  const workers = [...new Set(devices.map((d) => d.workerId))]
+  if (!workers.length || typeof mdkClient.pullSnapshot !== 'function') return { devices: {} }
+  const snap = await mdkClient.pullSnapshot({ workers, metrics: CHANNELS })
+  return { devices: (snap && snap.devices) || {}, snapshotTs: snap && snap.snapshotTs }
+}
+
+// A stored point holds `{ value }` per metric, or `{ error }` when the handler
+// failed at that sweep; an errored metric counts as missing.
+function storedMetrics (stored) {
+  const metrics = {}
+  for (const [name, reading] of Object.entries(stored.metrics || {})) {
+    if (reading && typeof reading === 'object' && 'value' in reading) metrics[name] = reading.value
+  }
+  return metrics
+}
+
+async function liveMetrics (deviceId) {
+  const tel = await mdkClient.pullTelemetry(deviceId, 'metrics').catch(() => null)
+  return (tel && tel.metrics) || {}
 }
