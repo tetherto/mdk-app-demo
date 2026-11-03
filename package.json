@@ -11,6 +11,13 @@
     "mdk",
     "mdk-app"
   ],
+  "files": [
+    "controllers/",
+    "lib/",
+    "mdk-app.yaml",
+    "mdk-plugin.json",
+    "README.md"
+  ],
   "scripts": {
     "lint": "standard",
     "lint:fix": "standard --fix",
@@ -26,6 +33,6 @@
     "standard": "17.1.0"
   },
   "overrides": {
-    "@fastify/static": "10.1.2"    
+    "@fastify/static": "10.1.2"
   }
 }
