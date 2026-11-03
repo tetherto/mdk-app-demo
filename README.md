@@ -42,12 +42,16 @@ the rest come back with `hasHistory: false` and no samples.
 
 | Route          | Method + path           | Notes                                                  |
 | -------------- | ----------------------- | ------------------------------------------------------ |
-| `demo.summary` | `GET /api/demo/summary` | Fleet totals (`hashrateThs`, `powerW`, `avgTemperatureC`) plus a per-device breakdown |
+| `demo.summary` | `GET /api/demo/summary` | Fleet totals (`hashrateThs`, `powerW`, `avgTemperatureC`) plus a per-device breakdown, from one `pullSnapshot` |
 | `demo.history` | `GET /api/demo/history` | Recent `history` telemetry samples for devices that declare the channel (`hasHistory`); `limit` (default `10`, capped at `500`) and optional `deviceId` narrow the read |
 
 `demo.summary` sums `hashrate_rt` and `power` across every matched device and averages `temperature` over the devices
-that report one; `power_mode` stays per-device. `demo.history` returns whatever each Worker's `history` handler returns,
-and 404s with `ERR_UNKNOWN_DEVICE_ID` when a `deviceId` filter matches nothing.
+that report one; `power_mode` stays per-device. It reads the fleet in one Kernel call, `pullSnapshot`, answered from the
+stores of Workers that poll their devices (`telemetryPollIntervalMs` in the contract, or in `mdk.yaml` under
+`spec.workers[].config`), so the app never polls hardware itself; `snapshotTs` is the newest stored point. A device the
+snapshot does not hold, because its Worker does not poll or has no point yet, is read live with `pullTelemetry`, and each
+row's `source` says `snapshot` or `live`. `demo.history` returns whatever each Worker's `history` handler returns, and
+404s with `ERR_UNKNOWN_DEVICE_ID` when a `deviceId` filter matches nothing.
 
 ## Errors
 
@@ -85,7 +89,7 @@ mdk-app-demo/
 ├── mdk-app.yaml            # App manifest: id, version, display name, permissions
 ├── mdk-plugin.json         # Route table with request and response schemas
 ├── controllers/
-│   ├── summary.js          # demo.summary: fleet totals and per-device metrics
+│   ├── summary.js          # demo.summary: fleet totals and per-device metrics from one pullSnapshot
 │   └── history.js          # demo.history: recent samples from each Worker's history channel
 ├── lib/
 │   ├── client.js           # This app's MDK client, provided by the app runtime

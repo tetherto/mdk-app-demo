@@ -21,6 +21,7 @@
                     "ok": { "type": "boolean" },
                     "kernelConnected": { "type": "boolean" },
                     "ts": { "type": "integer" },
+                    "snapshotTs": { "type": ["integer", "null"] },
                     "deviceCount": { "type": "integer" },
                     "totals": {
                       "type": "object",
@@ -38,10 +39,11 @@
           }
         }
       },
-      "description": "Fans out metrics telemetry to every registered device whose Worker exposes `hashrate_rt` in TH/s (what `mdk create worker` scaffolds) and returns fleet totals plus a per-device breakdown. Aggregation lives here — workers only ever answer for one device.",
+      "description": "Reads the fleet in one `pullSnapshot` call from the stores of Workers that poll their devices (`telemetryPollIntervalMs`), for every registered device whose Worker exposes `hashrate_rt` in TH/s (what `mdk create worker` scaffolds), and returns fleet totals plus a per-device breakdown. A device the snapshot does not hold (its Worker does not poll) is read live with `pullTelemetry`; each row says which (`source`).",
       "constraints": [
         "Requires the MDK client to be connected to a Kernel instance for live data.",
-        "Devices must expose `hashrate_rt` in TH/s, or with no unit; `power`, `temperature` and `power_mode` are read when present."
+        "Devices must expose `hashrate_rt` in TH/s, or with no unit; `power`, `temperature` and `power_mode` are read when present.",
+        "A Worker that does not declare `telemetryPollIntervalMs` is read live, one device at a time."
       ],
       "examples": [
         {
@@ -51,11 +53,14 @@
             "ok": true,
             "kernelConnected": true,
             "deviceCount": 2,
+            "snapshotTs": 1710000000000,
             "totals": { "hashrateThs": 240, "powerW": 6200, "avgTemperatureC": 65 },
             "devices": [
               {
                 "deviceId": "demo-a-0",
                 "workerId": "demo-a",
+                "source": "snapshot",
+                "ts": 1710000000000,
                 "hashrateThs": 100,
                 "powerW": 3000,
                 "temperatureC": 64,

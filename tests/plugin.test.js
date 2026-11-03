@@ -54,8 +54,32 @@ const DEMO_CAPS_FLAT = {
   ]
 }
 
-function mockClient ({ workers, metrics, history, historyViaMetrics, failList, failListErr, failCaps, failPull, pulls } = {}) {
+// `snapshot` is what polling Workers hold: { [workerId]: { [deviceId]: { [metric]: value | { error } } } }.
+// A worker without an entry does not poll and is reported under `errors`, as the Kernel does.
+function mockClient ({ workers, metrics, history, historyViaMetrics, failList, failListErr, failCaps, failPull, pulls, snapshot, snapshotTs } = {}) {
   return {
+    async pullSnapshot (query) {
+      if (pulls) pulls.push(`snapshot:${query.workers.join(',')}:${query.metrics.join(',')}`)
+      const devices = {}
+      const errors = {}
+      for (const workerId of query.workers) {
+        const held = snapshot && snapshot[workerId]
+        if (!held) {
+          errors[workerId] = 'ERR_TELEMETRY_STORE_DISABLED: snapshot'
+          continue
+        }
+        for (const [deviceId, values] of Object.entries(held)) {
+          const readings = {}
+          for (const name of query.metrics) {
+            if (!(name in values)) continue
+            const value = values[name]
+            readings[name] = value && typeof value === 'object' && value.error ? value : { value }
+          }
+          devices[deviceId] = { ts: snapshotTs || 1710000000000, metrics: readings }
+        }
+      }
+      return { devices, snapshotTs: snapshotTs || 1710000000000, ...(Object.keys(errors).length ? { errors } : {}) }
+    },
     async listWorkers () {
       if (failList) throw new Error(failListErr || 'ERR_MDK_CLIENT_UNAVAILABLE')
       return { workers: workers || [] }
@@ -123,6 +147,98 @@ test('demo plugin - summary aggregates hashrate and power across demo devices', 
   t.is(out.totals.avgTemperatureC, 65)
   t.alike(out.devices.map((d) => d.deviceId), ['demo-0', 'demo-1'])
   t.is(out.devices[1].powerMode, 'eco')
+})
+
+test('demo plugin - summary reads polling workers from the snapshot and never pulls their devices', async (t) => {
+  const pulls = []
+  const { summary } = loadDemoPlugin(mockClient({
+    workers: [
+      { workerId: 'demo-a', state: 'READY', deviceIds: ['demo-0', 'other-1'] },
+      { workerId: 'demo-b', state: 'READY', deviceIds: ['demo-1'] }
+    ],
+    snapshot: {
+      'demo-a': { 'demo-0': { hashrate_rt: 100, power: 3000, temperature: 64, power_mode: 'normal' }, 'other-1': { power: 9999 } },
+      'demo-b': { 'demo-1': { hashrate_rt: 140, power: 3200, temperature: { error: 'ERR_TELEMETRY_FAILED' }, power_mode: 'eco' } }
+    },
+    snapshotTs: 1710000005000,
+    metrics: { 'demo-0': { hashrate_rt: 1 }, 'demo-1': { hashrate_rt: 1 } },
+    pulls
+  }))
+
+  const out = await summary(emptyReq())
+
+  t.is(out.deviceCount, 2)
+  t.is(out.snapshotTs, 1710000005000)
+  t.is(out.totals.hashrateThs, 240, 'totals come from the stored points, not the live values')
+  t.is(out.totals.powerW, 6200)
+  t.is(out.totals.avgTemperatureC, 64, 'an errored reading is a gap, not a 0')
+  t.alike(out.devices.map((d) => [d.deviceId, d.source, d.ts]), [['demo-0', 'snapshot', 1710000005000], ['demo-1', 'snapshot', 1710000005000]])
+  t.is(out.devices[1].temperatureC, 0)
+  t.is(out.devices[1].powerMode, 'eco')
+  t.alike(pulls, ['snapshot:demo-a,demo-b:hashrate_rt,power,temperature,power_mode'], 'one Kernel read, no per-device pull')
+})
+
+test('demo plugin - summary falls back to a live pull only for devices the snapshot does not hold', async (t) => {
+  const pulls = []
+  const { summary } = loadDemoPlugin(mockClient({
+    workers: [
+      { workerId: 'polls', state: 'READY', deviceIds: ['demo-0', 'demo-new'] },
+      { workerId: 'legacy', state: 'READY', deviceIds: ['demo-1'] }
+    ],
+    snapshot: { polls: { 'demo-0': { hashrate_rt: 100, power: 3000 } } },
+    metrics: {
+      'demo-new': { hashrate_rt: 10, power: 300 },
+      'demo-1': { hashrate_rt: 140, power: 3200, temperature: 66 }
+    },
+    pulls
+  }))
+
+  const out = await summary(emptyReq())
+
+  t.is(out.totals.hashrateThs, 250)
+  t.alike(out.devices.map((d) => [d.deviceId, d.source]), [['demo-0', 'snapshot'], ['demo-1', 'live'], ['demo-new', 'live']])
+  t.alike(pulls, ['snapshot:polls,legacy:hashrate_rt,power,temperature,power_mode', 'demo-1:metrics', 'demo-new:metrics'],
+    'the polling worker is read once; only the legacy worker and the device without a point are pulled live')
+})
+
+test('demo plugin - summary falls back to live pulls on a 0.13.0 stack: the client throws on the unknown method, or the Kernel answers an error', async (t) => {
+  const pulls = []
+  const opts = {
+    workers: [{ workerId: 'demo-a', state: 'READY', deviceIds: ['demo-0'] }],
+    metrics: { 'demo-0': { hashrate_rt: 100, power: 3000 } },
+    pulls
+  }
+  // @tetherto/mdk-client 0.13.0: every method name resolves (Proxy) and an unknown one rejects.
+  const older = mockClient(opts)
+  older.pullSnapshot = async () => { throw new Error('ERR_MDK_CLIENT_NO_SUCH_METHOD: pullSnapshot') }
+  let out = await loadDemoPlugin(older).summary(emptyReq())
+  t.is(out.ok, true)
+  t.is(out.totals.hashrateThs, 100)
+  t.is(out.snapshotTs, null)
+  t.alike(out.devices.map((d) => d.source), ['live'])
+  t.alike(pulls, ['demo-0:metrics'])
+
+  // A 0.13.0 Kernel: the query is not understood and comes back as an { error } reply.
+  pulls.length = 0
+  const olderKernel = mockClient(opts)
+  olderKernel.pullSnapshot = async () => ({ error: 'ERR_DEVICE_ID_REQUIRED: snapshot' })
+  out = await loadDemoPlugin(olderKernel).summary(emptyReq())
+  t.is(out.totals.hashrateThs, 100)
+  t.alike(out.devices.map((d) => d.source), ['live'])
+  t.alike(pulls, ['demo-0:metrics'])
+})
+
+test('demo plugin - summary works against a client without pullSnapshot', async (t) => {
+  const client = mockClient({
+    workers: [{ workerId: 'demo-a', state: 'READY', deviceIds: ['demo-0'] }],
+    metrics: { 'demo-0': { hashrate_rt: 100, power: 3000 } }
+  })
+  delete client.pullSnapshot
+  const { summary } = loadDemoPlugin(client)
+  const out = await summary(emptyReq())
+  t.is(out.totals.hashrateThs, 100)
+  t.is(out.snapshotTs, null)
+  t.is(out.devices[0].source, 'live')
 })
 
 test('demo plugin - summary empty fleet averages temperature as null', async (t) => {
